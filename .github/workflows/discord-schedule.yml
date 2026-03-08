@@ -1,1 +1,61 @@
+name: discord-schedule
 
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: discord-schedule
+  cancel-in-progress: false
+
+jobs:
+  send-discord-schedule:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 가져오기
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 라이브러리 설치
+        working-directory: discord-bot
+        run: pip install -r requirements.txt
+
+      - name: sent_records.json 없으면 생성
+        working-directory: discord-bot
+        run: |
+          if [ ! -f sent_records.json ]; then
+            echo "[]" > sent_records.json
+          fi
+
+      - name: 디스코드 일정 확인 및 전송
+        working-directory: discord-bot
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_WORKSHEET_NAME: ${{ secrets.GOOGLE_WORKSHEET_NAME }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python bot.py
+
+      - name: sent_records.json 변경사항 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add discord-bot/sent_records.json
+
+          if git diff --cached --quiet; then
+            echo "변경사항 없음"
+          else
+            git commit -m "Update sent records"
+            git push
+          fi
