@@ -79,6 +79,7 @@ GitHub 업로드부터 Discord 봇 생성, Google 서비스 계정 생성, GitHu
 
 1. Google Cloud 콘솔에서 API 라이브러리로 이동합니다.
 2. **Google Sheets API**를 활성화합니다.
+3. **Google Drive API**를 활성화합니다.
 
 ## 7. 서비스 계정 키(JSON) 만들기
 
