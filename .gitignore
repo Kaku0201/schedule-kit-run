@@ -205,9 +205,3 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
-discord-bot/bot_config.json
-discord-bot/sent_records.json
-service-account.json
-credentials.json
-.env
