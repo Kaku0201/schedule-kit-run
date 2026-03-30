@@ -163,6 +163,7 @@ def read_participation_rows() -> List[Dict[str, Any]]:
     spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
     worksheet = spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
 
+    # 1행: 닉네임 / 2행: 코드 / 3행부터 데이터
     all_values = worksheet.get_all_values()
     if len(all_values) < 3:
         return []
@@ -171,6 +172,7 @@ def read_participation_rows() -> List[Dict[str, Any]]:
     code_row = all_values[1]
     data_rows = all_values[2:]
 
+    # A: 날짜 / B: 요일 / C: 시간 / D~K: 참여 여부
     nicknames = nickname_row[3:11]
     codes = code_row[3:11]
 
@@ -301,6 +303,7 @@ def is_allowed_channel(guild_id: Optional[int], channel_id: Optional[int]) -> bo
 
     configured_channel_id = get_configured_channel_id(guild_id)
 
+    # 채널 지정 안 했으면 어디서든 사용 가능
     if configured_channel_id is None:
         return True
 
@@ -329,7 +332,11 @@ class ScheduleBot(commands.Bot):
 bot = ScheduleBot()
 
 
-async def send_embed_pages(interaction: discord.Interaction, embeds: List[discord.Embed], empty_message: str) -> None:
+async def send_embed_pages(
+    interaction: discord.Interaction,
+    embeds: List[discord.Embed],
+    empty_message: str,
+) -> None:
     if not embeds:
         await interaction.edit_original_response(content=empty_message)
         return
@@ -451,7 +458,7 @@ async def reset_sent_records_command(interaction: discord.Interaction) -> None:
     clear_guild_sent_keys(interaction.guild_id)
 
     await interaction.response.send_message(
-        "이 서버의 보낸 일정 기록을 초기화했어요.\n이제 `/일정`을 실행하면 현재 시트에 있는 일정이 다시 신규로 전송돼요.",
+        "이 서버의 보낸 일정 기록을 초기화했어요.\n이제 `/일정`을 실행하면 현재 시트의 일정이 다시 신규로 전송돼요.",
         ephemeral=True,
     )
 
@@ -492,7 +499,8 @@ async def set_channel_command(
     set_configured_channel_id(interaction.guild_id, target_channel.id)
 
     await interaction.response.send_message(
-        f"이 서버의 일정 채널을 {target_channel.mention} 으로 설정했어요.\n이제 `/일정`, `/전체일정`은 해당 채널에서만 사용할 수 있어요.",
+        f"이 서버의 일정 채널을 {target_channel.mention} 으로 설정했어요.\n"
+        f"이제 `/일정`, `/전체일정`은 해당 채널에서만 사용할 수 있어요.",
         ephemeral=True,
     )
 
