@@ -1,3 +1,4 @@
-discord.py>=2.4.0
-gspread>=6.1.0
-google-auth>=2.35.0
+discord.py
+gspread
+google-auth
+matplotlib
