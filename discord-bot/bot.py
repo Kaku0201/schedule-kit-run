@@ -239,6 +239,20 @@ def parse_schedule_rows(
         if not date_value:
             continue
 
+        try:
+            row_date = datetime.strptime(
+                date_value,
+                "%Y.%m.%d"
+            ).date()
+
+        except ValueError:
+        continue
+
+        today = datetime.today().date()
+
+        if row_date < today:
+            continue
+
         weekday = padded[1].strip()
         time_value = padded[2].strip()
 
