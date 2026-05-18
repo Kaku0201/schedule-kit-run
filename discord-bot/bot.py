@@ -20,7 +20,8 @@ from google.oauth2.service_account import Credentials
 
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+with open("service_account.json", "r", encoding="utf-8") as f:
+    GOOGLE_SERVICE_ACCOUNT_JSON = f.read().strip()
 
 PARTICIPATION_SHEET = "참여인원저장"
 MEMO_SHEET = "날짜메모"
