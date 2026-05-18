@@ -1,61 +1,164 @@
 import json
 import os
-from pathlib import Path
-from typing import List, Dict, Any
+import re
+import sqlite3
+from datetime import datetime
+from typing import Dict, List, Any
 
 import discord
 import gspread
+
+from discord import app_commands
+from discord.ext import commands
 from google.oauth2.service_account import Credentials
 
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "").strip()
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "참여인원저장").strip()
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv(
+    "GOOGLE_SERVICE_ACCOUNT_JSON",
+    ""
+).strip()
 
-STATE_FILE = Path("sent_records.json")
+PARTICIPATION_SHEET = "참여인원저장"
+MEMO_SHEET = "날짜메모"
 
-
-def load_sent_records() -> List[str]:
-    if not STATE_FILE.exists():
-        return []
-
-    try:
-        with STATE_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if isinstance(data, list):
-            return [str(x) for x in data]
-
-        return []
-    except Exception:
-        return []
+DATABASE_FILE = "database.sqlite"
 
 
-def save_sent_records(records: List[str]) -> None:
-    with STATE_FILE.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+JOB_NAMES = {
+    "나이트": "PLD",
+    "전사": "WAR",
+    "암흑기사": "DRK",
+    "건브레이커": "GNB",
+
+    "백마도사": "WHM",
+    "학자": "SCH",
+    "점성술사": "AST",
+    "현자": "SGE",
+
+    "몽크": "MNK",
+    "용기사": "DRG",
+    "닌자": "NIN",
+    "사무라이": "SAM",
+    "리퍼": "RPR",
+    "바이퍼": "VPR",
+
+    "음유시인": "BRD",
+    "기공사": "MCH",
+    "무도가": "DNC",
+
+    "흑마도사": "BLM",
+    "소환사": "SMN",
+    "적마도사": "RDM",
+    "청마도사": "BLU",
+    "픽토맨서": "PCT",
+}
 
 
-def validate_env() -> None:
-    missing = []
+def init_database():
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
 
-    if not DISCORD_BOT_TOKEN:
-        missing.append("DISCORD_BOT_TOKEN")
-    if not DISCORD_CHANNEL_ID:
-        missing.append("DISCORD_CHANNEL_ID")
-    if not GOOGLE_SHEET_ID:
-        missing.append("GOOGLE_SHEET_ID")
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            guild_id TEXT PRIMARY KEY,
+            sheet_id TEXT,
+            channel_id TEXT
+        )
+    """)
 
-    if missing:
-        raise RuntimeError(f"필수 환경변수가 비어 있음: {', '.join(missing)}")
+    conn.commit()
+    conn.close()
 
 
-def get_gspread_client() -> gspread.Client:
-    service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+def save_guild_setting(
+    guild_id: str,
+    sheet_id: str = None,
+    channel_id: str = None
+):
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (
+            guild_id,
+            sheet_id,
+            channel_id
+        )
+        VALUES (?, ?, ?)
+    """, (
+        guild_id,
+        None,
+        None
+    ))
+
+    if sheet_id is not None:
+        cursor.execute("""
+            UPDATE settings
+            SET sheet_id = ?
+            WHERE guild_id = ?
+        """, (
+            sheet_id,
+            guild_id
+        ))
+
+    if channel_id is not None:
+        cursor.execute("""
+            UPDATE settings
+            SET channel_id = ?
+            WHERE guild_id = ?
+        """, (
+            channel_id,
+            guild_id
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_guild_setting(
+    guild_id: str
+):
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT sheet_id, channel_id
+        FROM settings
+        WHERE guild_id = ?
+    """, (guild_id,))
+
+    result = cursor.fetchone()
+
+    conn.close()
+
+    if not result:
+        return None
+
+    return {
+        "sheet_id": result[0],
+        "channel_id": result[1]
+    }
+
+
+def extract_sheet_id(
+    url: str
+):
+    match = re.search(
+        r"/spreadsheets/d/([a-zA-Z0-9-_]+)",
+        url
+    )
+
+    if not match:
+        return None
+
+    return match.group(1)
+
+
+def get_gspread_client():
+    service_account_info = json.loads(
+        GOOGLE_SERVICE_ACCOUNT_JSON
+    )
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -66,157 +169,505 @@ def get_gspread_client() -> gspread.Client:
         service_account_info,
         scopes=scopes,
     )
+
     return gspread.authorize(credentials)
 
 
-def read_participation_rows() -> List[Dict[str, Any]]:
+def get_sheet(
+    sheet_id: str,
+    worksheet_name: str
+):
     client = get_gspread_client()
-    spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-    worksheet = spreadsheet.worksheet(GOOGLE_WORKSHEET_NAME)
 
-    # 1행: 닉네임 / 2행: 코드 / 3행부터 데이터
+    spreadsheet = client.open_by_key(
+        sheet_id
+    )
+
+    return spreadsheet.worksheet(
+        worksheet_name
+    )
+
+
+def get_job_emoji(
+    bot,
+    job_name: str
+):
+    emoji_name = JOB_NAMES.get(
+        job_name
+    )
+
+    if not emoji_name:
+        return "❔"
+
+    emoji = discord.utils.get(
+        bot.emojis,
+        name=emoji_name
+    )
+
+    if emoji:
+        return str(emoji)
+
+    return "❔"
+
+
+def parse_schedule_rows(
+    sheet_id: str
+):
+    worksheet = get_sheet(
+        sheet_id,
+        PARTICIPATION_SHEET
+    )
+
     all_values = worksheet.get_all_values()
 
     if len(all_values) < 3:
         return []
 
-    nickname_row = all_values[0]
-    code_row = all_values[1]
+    job_row = all_values[0]
+    nickname_row = all_values[1]
     data_rows = all_values[2:]
 
-    # A: 날짜 / B: 요일 / C: 시간 / D~K: 참여 여부
-    nicknames = nickname_row[3:11]
-    codes = code_row[3:11]
-
-    rows: List[Dict[str, Any]] = []
+    schedules = []
 
     for row in data_rows:
-        padded = row + [""] * max(0, 11 - len(row))
+        padded = row + [""] * (
+            len(job_row) - len(row)
+        )
 
         date_value = padded[0].strip()
-        weekday = padded[1].strip()
-        time_value = padded[2].strip()
-        marks = padded[3:11]
 
         if not date_value:
             continue
 
+        weekday = padded[1].strip()
+        time_value = padded[2].strip()
+
         participants = []
-        participant_codes = []
+        non_participants = []
 
-        for idx, mark in enumerate(marks):
-            if mark.strip().upper() == "O":
-                nickname = nicknames[idx].strip() if idx < len(nicknames) else ""
-                code = codes[idx].strip() if idx < len(codes) else ""
+        for idx in range(3, len(padded)):
+            mark = padded[idx].strip().upper()
 
-                participants.append(nickname or code or f"참여자{idx + 1}")
-                participant_codes.append(code or f"P{idx + 1}")
+            nickname = nickname_row[idx].strip()
+            job = job_row[idx].strip()
 
-        record_key = make_record_key(
-            date_value=date_value,
-            weekday=weekday,
-            time_value=time_value,
-            participant_codes=participant_codes,
-        )
+            if not nickname:
+                continue
 
-        rows.append(
-            {
-                "date": date_value,
-                "weekday": weekday,
-                "time": time_value,
-                "participants": participants,
-                "participant_codes": participant_codes,
-                "record_key": record_key,
+            member = {
+                "nickname": nickname,
+                "job": job,
             }
+
+            if mark == "O":
+                participants.append(member)
+            else:
+                non_participants.append(member)
+
+        schedules.append({
+            "date": date_value,
+            "weekday": weekday,
+            "time": time_value,
+            "participants": participants,
+            "non_participants": non_participants,
+        })
+
+    return schedules
+
+
+def parse_memo_map(
+    sheet_id: str
+):
+    worksheet = get_sheet(
+        sheet_id,
+        MEMO_SHEET
+    )
+
+    all_values = worksheet.get_all_values()
+
+    if len(all_values) < 3:
+        return {}
+
+    nickname_row = all_values[1]
+    data_rows = all_values[2:]
+
+    memo_map = {}
+
+    for row in data_rows:
+        padded = row + [""] * (
+            len(nickname_row) - len(row)
         )
 
-    return rows
+        date_value = padded[0].strip()
+
+        if not date_value:
+            continue
+
+        memos = []
+
+        for idx in range(3, len(padded)):
+            memo = padded[idx].strip()
+
+            if not memo:
+                continue
+
+            nickname = nickname_row[idx].strip()
+
+            memos.append({
+                "nickname": nickname,
+                "memo": memo,
+            })
+
+        memo_map[date_value] = memos
+
+    return memo_map
 
 
-def make_record_key(
-    date_value: str,
-    weekday: str,
-    time_value: str,
-    participant_codes: List[str],
-) -> str:
-    codes = ",".join(participant_codes)
-    return f"{date_value}|{weekday}|{time_value}|{codes}"
+def build_member_text(
+    bot,
+    members
+):
+    result = []
+
+    for member in members:
+        emoji = get_job_emoji(
+            bot,
+            member["job"]
+        )
+
+        result.append(
+            f"{emoji} {member['nickname']}"
+        )
+
+    return " ".join(result)
 
 
-def build_embed(new_rows: List[Dict[str, Any]]) -> discord.Embed:
+def build_memo_text(
+    bot,
+    memos,
+    members
+):
+    if not memos:
+        return "특이사항 없음"
+
+    member_job_map = {}
+
+    for member in members:
+        member_job_map[
+            member["nickname"]
+        ] = member["job"]
+
     lines = []
 
-    for row in new_rows:
-        date_text = row["date"]
-        weekday = row["weekday"]
-        time_value = row["time"]
-        participants = row["participants"]
+    for memo_data in memos:
+        nickname = memo_data["nickname"]
+        memo = memo_data["memo"]
 
-        header = date_text
-        if weekday:
-            header += f" ({weekday})"
-        if time_value:
-            header += f" {time_value}"
+        job = member_job_map.get(
+            nickname,
+            ""
+        )
 
-        participant_text = ", ".join(participants) if participants else "없음"
+        emoji = get_job_emoji(
+            bot,
+            job
+        )
 
-        lines.append(f"**• {header}**")
-        lines.append(participant_text)
-        lines.append("")
+        lines.append(
+            f"{emoji} {nickname}: {memo}"
+        )
 
-    description = "\n".join(lines).strip()
+    return "\n".join(lines)
 
-    return discord.Embed(
-        title="🔔 이번 주 공대 일정",
-        description=description,
+
+def build_schedule_embed(
+    bot,
+    schedules,
+    memo_map
+):
+    embed = discord.Embed(
+        title="📅 이번 주 일정",
+        color=0x7289DA,
     )
+
+    sections = []
+
+    for schedule in schedules:
+        date_text = schedule["date"]
+        weekday = schedule["weekday"]
+        time_value = schedule["time"]
+
+        participants = build_member_text(
+            bot,
+            schedule["participants"]
+        )
+
+        non_participants = build_member_text(
+            bot,
+            schedule["non_participants"]
+        )
+
+        memo_text = build_memo_text(
+            bot,
+            memo_map.get(date_text, []),
+            schedule["participants"]
+            + schedule["non_participants"]
+        )
+
+        block = (
+            f"## {date_text} ({weekday}) {time_value}\n\n"
+            f"### ✅ 참여자\n"
+            f"{participants or '없음'}\n\n"
+            f"### 📝 특이사항\n"
+            f"{memo_text}\n\n"
+            f"### ❌ 미참여자\n"
+            f"{non_participants or '없음'}"
+        )
+
+        sections.append(block)
+
+    embed.description = (
+        "\n\n━━━━━━━━━━━━━━\n\n"
+    ).join(sections)
+
+    embed.set_footer(
+        text="FF14 Schedule Bot"
+    )
+
+    return embed
 
 
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+)
 
 
-@client.event
+@bot.event
 async def on_ready():
+    print(
+        f"로그인 완료: {bot.user}"
+    )
+
+    init_database()
+
     try:
-        print(f"로그인 완료: {client.user}")
+        synced = await bot.tree.sync()
 
-        rows = read_participation_rows()
-        sent_records = set(load_sent_records())
-
-        new_rows = [row for row in rows if row["record_key"] not in sent_records]
-
-        if not new_rows:
-            print("새로 보낼 일정 없음")
-            await client.close()
-            return
-
-        new_rows.sort(key=lambda x: (x["date"], x["time"]))
-
-        channel = client.get_channel(int(DISCORD_CHANNEL_ID))
-        if channel is None:
-            channel = await client.fetch_channel(int(DISCORD_CHANNEL_ID))
-
-        embed = build_embed(new_rows)
-        await channel.send(embed=embed)
-
-        for row in new_rows:
-            sent_records.add(row["record_key"])
-
-        save_sent_records(sorted(sent_records))
-        print(f"{len(new_rows)}개의 새 일정 전송 완료")
+        print(
+            f"슬래시 명령어 동기화 완료: {len(synced)}개"
+        )
 
     except Exception as e:
-        print(f"오류 발생: {e}")
-        raise
-    finally:
-        await client.close()
+        print(
+            f"명령어 동기화 실패: {e}"
+        )
 
 
-def main() -> None:
-    validate_env()
-    client.run(DISCORD_BOT_TOKEN)
+@bot.tree.command(
+    name="시트연동",
+    description="구글 시트를 연동합니다."
+)
+@app_commands.default_permissions(
+    administrator=True
+)
+async def connect_sheet(
+    interaction: discord.Interaction,
+    sheet_url: str
+):
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    try:
+        sheet_id = extract_sheet_id(
+            sheet_url
+        )
+
+        if not sheet_id:
+            await interaction.followup.send(
+                "올바른 구글 시트 링크가 아닙니다.",
+                ephemeral=True
+            )
+            return
+
+        save_guild_setting(
+            guild_id=str(
+                interaction.guild_id
+            ),
+            sheet_id=sheet_id
+        )
+
+        await interaction.followup.send(
+            "시트 연동 완료",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"오류 발생: {e}",
+            ephemeral=True
+        )
 
 
-if __name__ == "__main__":
-    main()
+@bot.tree.command(
+    name="채널연동",
+    description="현재 채널을 일정 출력 채널로 설정합니다."
+)
+@app_commands.default_permissions(
+    administrator=True
+)
+async def connect_channel(
+    interaction: discord.Interaction
+):
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    try:
+        save_guild_setting(
+            guild_id=str(
+                interaction.guild_id
+            ),
+            channel_id=str(
+                interaction.channel_id
+            )
+        )
+
+        await interaction.followup.send(
+            "채널 연동 완료",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"오류 발생: {e}",
+            ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="설정확인",
+    description="현재 서버 설정을 확인합니다."
+)
+@app_commands.default_permissions(
+    administrator=True
+)
+async def check_settings(
+    interaction: discord.Interaction
+):
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    setting = get_guild_setting(
+        str(interaction.guild_id)
+    )
+
+    if not setting:
+        await interaction.followup.send(
+            "설정 없음",
+            ephemeral=True
+        )
+        return
+
+    sheet_id = setting["sheet_id"]
+    channel_id = setting["channel_id"]
+
+    text = (
+        f"시트 연동: "
+        f"{'설정됨' if sheet_id else '없음'}\n"
+        f"채널 연동: "
+        f"{f'<#{channel_id}>' if channel_id else '없음'}"
+    )
+
+    await interaction.followup.send(
+        text,
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="일정출력",
+    description="이번 주 일정을 출력합니다."
+)
+async def send_schedule(
+    interaction: discord.Interaction
+):
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    try:
+        setting = get_guild_setting(
+            str(interaction.guild_id)
+        )
+
+        if not setting:
+            await interaction.followup.send(
+                "시트가 연동되지 않았습니다.",
+                ephemeral=True
+            )
+            return
+
+        sheet_id = setting["sheet_id"]
+        channel_id = setting["channel_id"]
+
+        if not sheet_id:
+            await interaction.followup.send(
+                "시트가 연동되지 않았습니다.",
+                ephemeral=True
+            )
+            return
+
+        if not channel_id:
+            await interaction.followup.send(
+                "채널이 연동되지 않았습니다.",
+                ephemeral=True
+            )
+            return
+
+        schedules = parse_schedule_rows(
+            sheet_id
+        )
+
+        memo_map = parse_memo_map(
+            sheet_id
+        )
+
+        embed = build_schedule_embed(
+            bot,
+            schedules,
+            memo_map
+        )
+
+        channel = bot.get_channel(
+            int(channel_id)
+        )
+
+        if not channel:
+            await interaction.followup.send(
+                "채널을 찾을 수 없습니다.",
+                ephemeral=True
+            )
+            return
+
+        await channel.send(
+            embed=embed
+        )
+
+        await interaction.followup.send(
+            "일정 출력 완료",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"오류 발생: {e}",
+            ephemeral=True
+        )
+
+
+bot.run(DISCORD_BOT_TOKEN)
